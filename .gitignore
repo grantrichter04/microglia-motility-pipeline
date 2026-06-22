@@ -1,0 +1,57 @@
+# =============================================================================
+#  .gitignore  —  Microglia Motility Pipeline
+# =============================================================================
+
+# ---- Raw and processed image data (too large for git) -----------------------
+*.lif
+*.tif
+*.tiff
+*.ome.tif
+*.ome.tiff
+
+# ---- TrackMate outputs (XML can be large; CSVs tracked separately) ----------
+*_tracks.xml
+
+# ---- Fiji/ImageJ intermediates ----------------------------------------------
+*.bak
+*.log
+
+# ---- Labkit classifier -------------------------------------------------------
+# The .classifier file is the trained segmentation model.
+# It is worth keeping in the repo for reproducibility, but can be large (10-200 MB).
+# If it exceeds GitHub's 100 MB limit, use Git LFS or store it separately and
+# link to it in the README.
+# Uncomment the line below to exclude it:
+# *.classifier
+
+# ---- Python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.pyo
+.ipynb_checkpoints/
+.env
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# ---- Data files (exclude large CSVs; keep small summary tables if needed) ---
+# Uncomment to exclude all CSVs:
+# *.csv
+
+# ---- Windows ----------------------------------------------------------------
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# ---- macOS ------------------------------------------------------------------
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# ---- Editors ----------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
