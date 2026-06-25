@@ -38,7 +38,7 @@ File inputDir
 if (INPUT_DIR?.trim()) {
     inputDir = new File(INPUT_DIR)
 } else {
-    def dc = new ij.io.DirectoryChooser("Select folder containing *_regions.tif files")
+    def dc = new ij.io.DirectoryChooser("Select root folder containing *_MIP.tif files")
     def chosen = dc.getDirectory()
     if (chosen == null) { IJ.log("Batch cancelled — no directory chosen."); return }
     inputDir = new File(chosen)
@@ -48,17 +48,28 @@ if (!inputDir.isDirectory()) {
 }
 
 // =====================================================================
-//  DISCOVER FILES
+//  DISCOVER FILES  (recursive — descends into subdirectories)
 // =====================================================================
-def allFiles = inputDir.listFiles({ File f ->
-    f.isFile() && f.name.toLowerCase().endsWith("_regions.tif")
-} as FileFilter)
+//  Uses a self-referencing closure (def x; x = { }) so the closure can
+//  call itself by name.  Mirrors the collectMIPs() pattern in 04_draw_injury.ijm.
+def collectMIPs
+collectMIPs = { File dir, List<File> acc ->
+    dir.listFiles()?.each { f ->
+        if (f.isDirectory())
+            collectMIPs(f, acc)                           // descend
+        else if (f.name.toLowerCase().endsWith("_mip.tif"))
+            acc << f
+    }
+}
 
-if (!allFiles || allFiles.length == 0) {
-    IJ.log("No *_regions.tif files found in: " + inputDir.absolutePath)
+List<File> files = []
+collectMIPs(inputDir, files)
+files.sort { it.absolutePath }   // sort by full path so subdirs stay grouped
+
+if (files.isEmpty()) {
+    IJ.log("No *_MIP.tif files found under: " + inputDir.absolutePath)
     return
 }
-List<File> files = allFiles.sort { it.name }
 int total = files.size()
 
 // =====================================================================
@@ -150,8 +161,8 @@ files.eachWithIndex { file, idx ->
         int nTracks = model.getTrackModel().nTracks(true)
 
         // ---- save XML beside source image --------------------------------
-        //      Replaces _regions.tif suffix → _tracks.xml
-        def outPath = file.absolutePath.replaceAll(/(?i)_regions\.tif$/, "_tracks.xml")
+        //      Replaces _MIP.tif suffix → _tracks.xml
+        def outPath = file.absolutePath.replaceAll(/(?i)_MIP\.tif$/, "_MIP.xml")
         def outFile = new File(outPath)
         def writer  = new TmXmlWriter(outFile)
         writer.appendLog(logSB.toString())

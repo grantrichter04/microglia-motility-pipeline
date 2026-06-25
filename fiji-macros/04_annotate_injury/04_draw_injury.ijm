@@ -1,11 +1,24 @@
 // =====================================================================
-//  REGION ANNOTATION (auto-tissue)
+//  REGION ANNOTATION (auto-tissue)  —  single / batch
 // =====================================================================
 //  Defines injured vs uninjured tissue regions on a composite time-lapse.
 //  The tissue body is auto-thresholded from the anatomy channel (frame 1),
 //  the user draws a single midline, and the tissue is cut in two along it.
 //  injured = 1, uninjured = 2. The label map is appended as a NEW channel
 //  (the last one), replicated across all T frames.
+//
+//  MODES
+//  -----
+//  Single : run on the currently open image (same as before).
+//  Batch  : pick a directory; every *_MIP.tif is processed in turn.
+//           The regions channel is appended in place — the original file
+//           is overwritten with one extra channel added (non-destructive;
+//           strip the last channel any time to recover the original data).
+//           Any orientation flips are baked into the pixel data; the flip
+//           tags (_FH / _FV) appear only in the Fiji window title for
+//           visual feedback, not in the saved filename.
+//           NOTE: ImageJ macros have no try/catch — any exit() inside
+//           annotateOne() (e.g. no line drawn) will halt the whole batch.
 //
 //  ORIENTATION STANDARDISATION (first step):
 //  Before anything else, the image is normalised to a common orientation
@@ -42,7 +55,7 @@ BLUR_SIGMA      = 20;         // big Gaussian to merge microglia into one mass
 THRESHOLD_METHOD= "Percentile"; // auto-threshold method (loose)
 LABEL_INJURED   = 1;
 LABEL_UNINJURED = 2;
-OUTPUT_SUFFIX   = "_regions";
+OUTPUT_SUFFIX   = "_regions";  // appended to Fiji window title only — NOT the saved filename
 OVERLAY_COLOR   = "cyan";
 OVERLAY_WIDTH   = 2;
 // Orientation standardisation targets (what every image is normalised to):
@@ -50,14 +63,91 @@ TARGET_HEAD     = "left";     // head should end up pointing this way
 TARGET_INJURY   = "top";      // injury should end up on this side
 // ---------------------------------------------------------------------
 
-if (nImages == 0) exit("Open a composite first.");
-annotateOne(getTitle());
+// ---- LAUNCH: choose mode -------------------------------------------
+Dialog.create("Region Annotation — Mode");
+Dialog.addMessage("Stage 4: annotate injury region.");
+Dialog.addChoice("Mode", newArray("Single open image", "Batch directory"), "Single open image");
+Dialog.show();
+runMode = Dialog.getChoice();
+
+if (runMode == "Single open image") {
+    if (nImages == 0) exit("No image is open. Open a *_MIP.tif composite first.");
+    annotateOne(getTitle());
+
+} else {
+    // ---- BATCH: loop over every *_MIP.tif in a chosen directory --------
+    inputDir = getDirectory("Select root directory to search for *_MIP.tif files");
+    if (inputDir == "") exit("No directory selected.");
+
+    // Recursively collect all *_MIP.tif paths under inputDir (including subdirs).
+    var targets = newArray(0);
+    collectMIPs(inputDir);
+    Array.sort(targets);
+
+    n = targets.length;
+    if (n == 0) exit("No *_MIP.tif files found under:\n" + inputDir);
+
+    print("\\Clear");
+    getDateAndTime(yr, mo, dow, dy, hr, mn, sc, ms);
+    print("=== Region Annotation Batch  " + yr + "-" +
+          IJ.pad(mo+1, 2) + "-" + IJ.pad(dy, 2) + "  " +
+          IJ.pad(hr, 2)   + ":" + IJ.pad(mn, 2) + ":" + IJ.pad(sc, 2) + " ===");
+    print("Directory : " + inputDir);
+    print("Files     : " + n);
+    print("(Each file requires interactive input — orientation dialog + line draw.)");
+    print("");
+
+    nOK = 0;
+
+    for (i = 0; i < n; i++) {
+        filePath = targets[i];                   // full absolute path from collectMIPs
+        fname    = File.getName(filePath);        // just the filename for logging
+        print("[" + (i+1) + "/" + n + "]  Opening: " + fname);
+        print("    Path: " + filePath);
+
+        open(filePath);
+        result = annotateOne(getTitle());   // interactive; exits batch on any error
+
+        // Overwrite original in place — regions channel is appended additively.
+        selectWindow(result);
+        saveAs("Tiff", filePath);
+        close();
+
+        nOK++;
+        print("    -> Amended in place: " + fname);
+        print("");
+    }
+
+    getDateAndTime(yr, mo, dow, dy, hr, mn, sc, ms);
+    print("=== DONE  " + IJ.pad(hr, 2) + ":" + IJ.pad(mn, 2) + ":" + IJ.pad(sc, 2) +
+          "  —  " + nOK + "/" + n + " annotated ===");
+}
+
+// =====================================================================
+// Recursive *_MIP.tif collector — appends full paths to the global
+// var targets array. Called with the root inputDir; recurses into any
+// subdirectory it finds (getFileList marks dirs with a trailing slash).
+function collectMIPs(dir) {
+    list = getFileList(dir);
+    for (i = 0; i < list.length; i++) {
+        if (endsWith(list[i], "/"))
+            collectMIPs(dir + list[i]);        // descend into subdirectory
+        else if (endsWith(list[i], "_MIP.tif"))
+            targets = Array.concat(targets, dir + list[i]);
+    }
+}
 
 // =====================================================================
 function annotateOne(title) {
     selectWindow(title);
     getDimensions(w, h, c, z, t);
     getVoxelSize(vw, vh, vd, vunit);
+
+    // Strip .tif extension so output naming doesn't embed it mid-filename
+    // (Fiji window titles include the extension when opened from disk).
+    baseName = title;
+    if (endsWith(toLowerCase(baseName), ".tif"))
+        baseName = substring(baseName, 0, lengthOf(baseName) - 4);
 
     // ---- prep view: anatomy (magenta) + neuron trace (green) --------
     // Guard against images that don't have the trace channels (avoids a
@@ -100,16 +190,30 @@ function annotateOne(title) {
     // (top), so the region cut always maps top = injured, bottom = uninjured.
     injurySide = TARGET_INJURY;
 
-    setTool("line");
+    setTool("polyline");
 
-    // ---- STEP 1: ask ONLY for the midline ---------------------------
+    // ---- STEP 1: draw the injury boundary (segmented line) ----------
+    // Show only the neuron trace channel (ch3, green) while drawing —
+    // the axon path makes the injury boundary easiest to judge.
+    // Keep re-prompting until a segmented-line selection (type 6) is
+    // active; showMessage explains the problem if OK is clicked too early.
+    Stack.setActiveChannels("0010");  // ch3 only (neuron trace, green)
     run("Select None");
-    waitForUser("Draw the injury boundary",
-        "Straight LINE tool: draw the divide across the FULL width,\n" +
-        "edge to edge (overshoot slightly), then click OK.");
-    if (selectionType() != 5) exit("No straight-line selection found. Use the LINE tool.");
+    gotLine = false;
+    while (!gotLine) {
+        waitForUser("Draw the injury boundary",
+            "SEGMENTED LINE tool: click to place vertices along the boundary,\n" +
+            "double-click to finish. Draw edge to edge (overshoot slightly).\n" +
+            "(Only ch" + TRACE_CH_B + " — neuron trace — is shown for clarity.)");
+        gotLine = (selectionType() == 5 || selectionType() == 6);
+        if (!gotLine)
+            showMessage("No line detected",
+                "No line selection is active.\n \n" +
+                "Use the SEGMENTED LINE tool: click to place vertices,\n" +
+                "double-click to finish, then click OK in the next prompt.");
+    }
     getSelectionCoordinates(lx, ly);
-    x1 = lx[0]; y1 = ly[0]; x2 = lx[1]; y2 = ly[1];
+    nPts = lx.length;
     selectWindow(title); run("Select None");
 
     // ---- auto-threshold the tissue from ch1, frame 1 ----------------
@@ -137,15 +241,29 @@ function annotateOne(title) {
     roiManager("add");            // index 0 = tissue body
     close();                      // close the 'tissue' working image
 
-    // ---- build the 'upper half-plane' polygon from the extended line -
-    dx = x2 - x1; dy = y2 - y1;
-    len = sqrt(dx*dx + dy*dy);
-    ux = dx/len; uy = dy/len;
+    // ---- build the 'upper' polygon from the extended polyline ----------
+    // Extend a ray backwards from the first vertex (along the first segment)
+    // and forwards from the last vertex (along the last segment), then close
+    // the polygon by looping way above the image — capturing everything on
+    // the injured side of the boundary. Works for any number of vertices;
+    // a 2-point line is just a degenerate case of the same geometry.
     big = (w + h) * 2;
-    ex1 = x1 - ux*big; ey1 = y1 - uy*big;
-    ex2 = x2 + ux*big; ey2 = y2 + uy*big;
-    hx = newArray(ex1, ex2, ex2, ex1);
-    hy = newArray(ey1, ey2, ey2 - big, ey1 - big);
+    dx0 = lx[1] - lx[0];         dy0 = ly[1] - ly[0];
+    len0 = sqrt(dx0*dx0 + dy0*dy0);
+    ex_s = lx[0] - (dx0/len0)*big;  ey_s = ly[0] - (dy0/len0)*big;
+
+    dxE = lx[nPts-1] - lx[nPts-2];  dyE = ly[nPts-1] - ly[nPts-2];
+    lenE = sqrt(dxE*dxE + dyE*dyE);
+    ex_e = lx[nPts-1] + (dxE/lenE)*big;  ey_e = ly[nPts-1] + (dyE/lenE)*big;
+
+    // Polygon: extended-start → all vertices → extended-end → two top-of-image corners
+    nPoly = nPts + 4;
+    hx = newArray(nPoly);  hy = newArray(nPoly);
+    hx[0] = ex_s;  hy[0] = ey_s;
+    for (k = 0; k < nPts; k++) { hx[k+1] = lx[k];  hy[k+1] = ly[k]; }
+    hx[nPts+1] = ex_e;        hy[nPts+1] = ey_e;
+    hx[nPts+2] = ex_e;        hy[nPts+2] = ey_e - big;
+    hx[nPts+3] = ex_s;        hy[nPts+3] = ey_s - big;
     makeSelection("polygon", hx, hy);
     roiManager("add");            // index 1 = upper half-plane
 
@@ -195,11 +313,16 @@ function annotateOne(title) {
     mergeArgs += "c" + (nCh + 1) + "=[regions] create";
 
     run("Merge Channels...", mergeArgs);
-    // Output name records any flips applied, in FH-then-FV order, before
-    // the _regions suffix, e.g. "..._FH_FV_regions".
-    finalTitle = title + flipTag + OUTPUT_SUFFIX;
+    // Window title: base name + flip tags + _regions suffix for visual feedback.
+    // The SAVED FILE is always the original path — see the batch loop above.
+    finalTitle = baseName + flipTag + OUTPUT_SUFFIX;
     rename(finalTitle);
     setVoxelSize(vw, vh, vd, vunit);
+
+    // Close the original — Merge Channels consumed orig_copy but left the
+    // source image open. Close it now so batch mode doesn't accumulate windows.
+    if (isOpen(title)) { selectWindow(title); close(); }
+    selectWindow(finalTitle);
 
 // ---- overlay: tissue outline + cut line clipped to the tissue --------
 selectWindow(finalTitle);
@@ -211,9 +334,9 @@ Overlay.addSelection(OVERLAY_COLOR, OVERLAY_WIDTH);
 
 // 2. cut line, clipped to inside the tissue, via a scratch image
 newImage("lineclip", "8-bit black", w, h, 1);
-makeLine(x1, y1, x2, y2);
+makeSelection("polyline", lx, ly);
 run("Line Width...", "line=3");          // a few px so it survives as an area
-run("Draw");                             // burn the (overshooting) line in white
+run("Draw");                             // burn the boundary line in white
 run("Select None");
 run("Line Width...", "line=1");          // restore default line width
 
