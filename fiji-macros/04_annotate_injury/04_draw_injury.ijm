@@ -51,7 +51,7 @@ TRACE_CHANNELS  = "1010";     // active channels while drawing: ch1 + ch3
 TRACE_CH_A      = 1;          // first channel shown for tracing (anatomy, magenta)
 TRACE_CH_B      = 3;          // second channel shown for tracing (neuron trace, green)
 TISSUE_CHANNEL  = 1;          // channel to threshold for the tissue body (anatomy)
-BLUR_SIGMA      = 20;         // big Gaussian to merge microglia into one mass
+BLUR_SIGMA      = 10;         // big Gaussian to merge microglia into one mass
 THRESHOLD_METHOD= "Percentile"; // auto-threshold method (loose)
 LABEL_INJURED   = 1;
 LABEL_UNINJURED = 2;
@@ -226,11 +226,12 @@ function annotateOne(title) {
     setOption("BlackBackground", true);
     run("Convert to Mask");
     run("Median...", "radius=50");
-    run("Options...", "iterations=40 count=1 black do=Dilate");
+    run("Options...", "iterations=5 count=1 black do=Dilate");
     run("Keep Largest Region");
     close("tissue");
     selectWindow("tissue-largest");
     rename("tissue");
+    
 
     // largest-object cleanup: remove small thresholded specks outside the body
     run("Options...", "iterations=1 count=1 black");

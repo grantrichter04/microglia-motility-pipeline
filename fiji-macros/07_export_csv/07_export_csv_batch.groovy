@@ -7,7 +7,7 @@ import java.io.PrintWriter
 // =====================================================================
 //  STAGE 7 — TrackMate XML → CSV batch export
 //
-//  Reads every curated *_tracks.xml in a directory tree and writes two
+//  Reads every curated *_MIP.xml in a directory tree and writes two
 //  CSV files beside each one:
 //
 //    *_spots.csv  — one row per spot per frame
@@ -48,7 +48,7 @@ File inputDir
 if (INPUT_DIR?.trim()) {
     inputDir = new File(INPUT_DIR)
 } else {
-    def dc = new ij.io.DirectoryChooser("Select root folder containing *_tracks.xml files")
+    def dc = new ij.io.DirectoryChooser("Select root folder containing *_MIP.xml files")
     def chosen = dc.getDirectory()
     if (chosen == null) { IJ.log("Export cancelled — no directory chosen."); return }
     inputDir = new File(chosen)

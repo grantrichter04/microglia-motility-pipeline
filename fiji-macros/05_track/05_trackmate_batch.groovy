@@ -161,7 +161,7 @@ files.eachWithIndex { file, idx ->
         int nTracks = model.getTrackModel().nTracks(true)
 
         // ---- save XML beside source image --------------------------------
-        //      Replaces _MIP.tif suffix → _tracks.xml
+        //      Replaces _MIP.tif suffix → _MIP.xml
         def outPath = file.absolutePath.replaceAll(/(?i)_MIP\.tif$/, "_MIP.xml")
         def outFile = new File(outPath)
         def writer  = new TmXmlWriter(outFile)
