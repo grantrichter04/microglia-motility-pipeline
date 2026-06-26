@@ -4,7 +4,9 @@
 //  Defines injured vs uninjured tissue regions on a composite time-lapse.
 //  The tissue body is auto-thresholded from the anatomy channel (frame 1),
 //  the user draws a single midline, and the tissue is cut in two along it.
-//  injured = 1, uninjured = 2. The label map is appended as a NEW channel
+//  Labels follow a spatial gradient so that median/mean of boundary spots
+//  degrades to an ADJACENT region: uninjured = 1, injured = 2, core = 3
+//  (0 = outside tissue). The label map is appended as a NEW channel
 //  (the last one), replicated across all T frames.
 //
 //  MODES
@@ -32,7 +34,7 @@
 //      _FV  = flipped vertically   (injury was on the bottom)
 //  Tags appear in FH-then-FV order, e.g. "..._FH_FV_regions.tif". Because
 //  the injury is guaranteed to be on TOP after this step, the region cut
-//  always maps top = injured (label 1), bottom = uninjured (label 2).
+//  always maps top = injured (label 2), bottom = uninjured (label 1).
 //
 //  EXPECTED CHANNEL LAYOUT (input = output of step 3, mask_microglia):
 //    ch1  anatomy marker (mnxbfp)   <- thresholded for the tissue body
@@ -40,7 +42,9 @@
 //    ch3  neuron trace (dye uptake) <- shown green while drawing the line
 //    ch4  microglia mask            <- used later by TrackMate
 //    -> this script appends:
-//    ch5  regions (injured / uninjured label map)
+//    ch5  regions label map (spatial gradient): 0 = outside tissue,
+//         1 = uninjured, 2 = injured (penumbra), 3 = injury core
+//         (optional tight ROI; overrides injured (2) inside it)
 //
 //  The TISSUE_CHANNEL and TRACE_CHANNELS settings below encode that
 //  layout; adjust them together if your channel order differs.
@@ -53,8 +57,17 @@ TRACE_CH_B      = 3;          // second channel shown for tracing (neuron trace,
 TISSUE_CHANNEL  = 1;          // channel to threshold for the tissue body (anatomy)
 BLUR_SIGMA      = 10;         // big Gaussian to merge microglia into one mass
 THRESHOLD_METHOD= "Percentile"; // auto-threshold method (loose)
-LABEL_INJURED   = 1;
-LABEL_UNINJURED = 2;
+// Region labels follow a spatial gradient (uninjured -> injured -> core) so
+// that the median/mean intensity of a boundary-straddling spot resolves to an
+// ADJACENT region rather than jumping across (e.g. avoids core+penumbra -> uninjured).
+LABEL_UNINJURED = 1;
+LABEL_INJURED   = 2;
+// ---- injury-core sub-region (optional) ----
+DRAW_CORE          = true;     // prompt to draw a tight injury-core ROI?
+                               // false = skip it, output stays 0/1/2 (back-compatible).
+LABEL_CORE         = 3;        // value written for the core; OVERRIDES injured (2) inside the ROI.
+CORE_DRAW_CHANNELS = "0010";   // channels shown while drawing the core: ch2 (microglia) + ch3 (trace)
+CORE_OVERLAY_COLOR = "yellow"; // QC overlay colour for the core outline
 OUTPUT_SUFFIX   = "_regions";  // appended to Fiji window title only — NOT the saved filename
 OVERLAY_COLOR   = "cyan";
 OVERLAY_WIDTH   = 2;
@@ -72,9 +85,11 @@ runMode = Dialog.getChoice();
 
 if (runMode == "Single open image") {
     if (nImages == 0) exit("No image is open. Open a *_MIP.tif composite first.");
-    annotateOne(getTitle());
+    sdir = getDirectory("image");      // "" if never saved to disk
+    annotateOne(getTitle(), sdir);
+}
 
-} else {
+ else {
     // ---- BATCH: loop over every *_MIP.tif in a chosen directory --------
     inputDir = getDirectory("Select root directory to search for *_MIP.tif files");
     if (inputDir == "") exit("No directory selected.");
@@ -138,7 +153,7 @@ function collectMIPs(dir) {
 }
 
 // =====================================================================
-function annotateOne(title) {
+function annotateOne(title, outDir) {
     selectWindow(title);
     getDimensions(w, h, c, z, t);
     getVoxelSize(vw, vh, vd, vunit);
@@ -216,6 +231,36 @@ function annotateOne(title) {
     nPts = lx.length;
     selectWindow(title); run("Select None");
 
+    // ---- STEP 1b: draw the injury-core ROI (optional) ---------------
+    // A tight closed region enclosing the cluster of injured cells. It is
+    // stored as label LABEL_CORE and later OVERRIDES injured wherever it
+    // sits, so the result is a core-vs-penumbra-vs-uninjured gradient.
+    // Drawn on the microglia + trace channels so the cluster is visible.
+    // coreN stays 0 if DRAW_CORE is off -> downstream core steps are skipped.
+    coreN = 0;
+    if (DRAW_CORE) {
+        Stack.setActiveChannels(CORE_DRAW_CHANNELS);
+        setTool("polygon");
+        run("Select None");
+        gotCore = false;
+        while (!gotCore) {
+            waitForUser("Draw the injury-core ROI",
+                "POLYGON (or FREEHAND) tool: enclose the tight cluster of\n" +
+                "injured cells, double-click to close. Becomes region " + LABEL_CORE + ".\n" +
+                "(Showing microglia + neuron-trace channels.)");
+            st = selectionType();
+            // accept any AREA selection: rectangle/oval/polygon/freehand/traced
+            gotCore = (st == 0 || st == 1 || st == 2 || st == 3 || st == 4);
+            if (!gotCore)
+                showMessage("No area selection",
+                    "Use the POLYGON or FREEHAND tool to enclose the core,\n" +
+                    "double-click to close, then click OK.");
+        }
+        getSelectionCoordinates(cx, cy);
+        coreN = cx.length;
+        selectWindow(title); run("Select None");
+    }
+
     // ---- auto-threshold the tissue from ch1, frame 1 ----------------
     selectWindow(title);
     run("Duplicate...", "title=tissue duplicate channels=" + TISSUE_CHANNEL + " frames=1");
@@ -279,6 +324,20 @@ function annotateOne(title) {
     newImage("regions_plane", "8-bit black", w, h, 1);
     roiManager("select", 2); setColor(topValue);    fill();
     roiManager("select", 3); setColor(bottomValue); fill();
+
+    // core LAST so it overrides injured/uninjured inside its ROI,
+    // clipped to the tissue body (index 0) so it can't spill into background.
+    coreClipIdx = -1;
+    if (DRAW_CORE && coreN > 0) {
+        makeSelection("polygon", cx, cy);
+        roiManager("add");                                   // core (raw)
+        coreRawIdx = roiManager("count") - 1;
+        roiManager("select", newArray(0, coreRawIdx));
+        roiManager("AND"); roiManager("add");                // core AND tissue
+        coreClipIdx = roiManager("count") - 1;
+        roiManager("select", coreClipIdx);
+        setColor(LABEL_CORE); fill();
+    }
     run("Select None");
 
     newImage("regions", "8-bit black", w, h, 1, 1, t);
@@ -365,9 +424,62 @@ if (nClip != -1) {
     Overlay.addSelection(OVERLAY_COLOR, OVERLAY_WIDTH);
 }
 
+// add the injury-core outline (tissue-clipped) to the overlay
+if (DRAW_CORE && coreClipIdx != -1) {
+    selectWindow(finalTitle);
+    roiManager("select", coreClipIdx);
+    Overlay.addSelection(CORE_OVERLAY_COLOR, OVERLAY_WIDTH);
+}
+
 selectWindow(finalTitle);
 run("Select None");
 Overlay.show;
+
+    // ---- save QC ROIs as a .zip sidecar -----------------------------
+    // Keep only the meaningful ROIs (tissue, clipped cut line, clipped core),
+    // not the half-plane / boolean temporaries. We re-add them to a clean
+    // manager with sensible names, then save.
+    // Grab the geometry we want BEFORE reset by re-selecting from the
+    // current manager and renaming.
+    roiManager("select", 0);
+    roiManager("rename", "tissue_body");
+    if (nClip != -1) {
+        roiManager("select", nClip);
+        roiManager("rename", "cut_line");
+    }
+    if (DRAW_CORE && coreClipIdx != -1) {
+        roiManager("select", coreClipIdx);
+        roiManager("rename", "injury_core");
+    }
+
+    if (outDir != "") {
+        // Build an index list of just the keepers, deselect-save the lot.
+        // Easiest robust path: select the keepers, but roiManager("save")
+        // saves ALL ROIs in the manager — so instead remove the temporaries.
+        // Indices to drop: everything except 0, nClip, coreClipIdx.
+        keep = newArray(0);
+        keep = Array.concat(keep, 0);
+        if (nClip != -1)                          keep = Array.concat(keep, nClip);
+        if (DRAW_CORE && coreClipIdx != -1)       keep = Array.concat(keep, coreClipIdx);
+
+        total = roiManager("count");
+        drop  = newArray(0);
+        for (q = 0; q < total; q++) {
+            isKeeper = false;
+            for (kk = 0; kk < keep.length; kk++) if (keep[kk] == q) isKeeper = true;
+            if (!isKeeper) drop = Array.concat(drop, q);
+        }
+        if (drop.length > 0) { roiManager("select", drop); roiManager("delete"); }
+
+        roiManager("deselect");
+        roiPath = outDir + baseName + flipTag + "_ROIs.zip";
+        roiManager("save", roiPath);
+        print("    ROI set saved: " + roiPath);
+    }
+    // -----------------------------------------------------------------
+
+    
+
 roiManager("reset");
 
     flipReport = flipTag;
@@ -376,5 +488,10 @@ roiManager("reset");
           ", injured=" + injurySide +
           " -> value " + LABEL_INJURED + ", tissue auto-thresholded (" +
           THRESHOLD_METHOD + ", sigma " + BLUR_SIGMA + "), all " + t + " frames.");
+    if (DRAW_CORE && coreN > 0)
+        print("  + injury-core ROI -> value " + LABEL_CORE +
+              " (overrides injured inside it).");
+    else if (DRAW_CORE)
+        print("  (injury-core enabled but none drawn — output is 0/1/2 only).");
     return finalTitle;
 }
