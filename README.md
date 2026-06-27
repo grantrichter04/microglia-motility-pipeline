@@ -102,3 +102,7 @@ Work one series through the whole chain before moving to the next. Each step add
 > **Plugins › TrackMate**, load the `*_MIP.xml`. If tracking is mostly good, fix individual tracks in the GUI. If it's poor, delete all tracks, switch to manual mode, and place spots over microglia frame by frame. Re-export the curated XML.
 
 6. **Export measurements** *(in progress — come find me)*
+
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/grantrichter04/microglia-motility-pipeline/blob/main/python/08_analysis/08_Microglia_analysis_TUTORIAL.ipynb)
+
