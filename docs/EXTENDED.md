@@ -165,44 +165,69 @@ After Labkit classifies, the raw mask is refined in three sub-steps: binarise to
 The mask is appended as **channel 4** of the existing `_MIP.tif`, in place — in active mode the open window is updated; in batch mode the source file is overwritten.
 
 ---
+<!-- ===== CONVENTIONS: replace the channel-5 row + add codes table ===== -->
+
+| 5 | Region label map (gradient — see codes below) | Step 04 |
+
+**Channel 5 region codes** (the values Step 07's CSV exposes and the analysis reads):
+
+| Code | Region |
+|-----:|--------|
+| 0 | outside tissue |
+| 1 | uninjured |
+| 2 | injured (penumbra) |
+| 3 | injury core |
+
+The labels are laid out as a deliberate **spatial gradient** (uninjured → penumbra → core), so the median/mean intensity of a spot straddling a boundary resolves to an *adjacent* region rather than jumping across it.
+
+<!-- ===== STEP 04 — full section replacement ===== -->
 
 ## Step 04 — Annotate injury region
 `04_draw_injury.ijm`
 
 ### Why
-To compare microglial behaviour either side of the injury, each timelapse needs an injured-vs-uninjured region map. This step standardises orientation, auto-thresholds the tissue body, lets you draw the injury boundary, and appends the resulting label map as channel 5. Because all TrackMate analysers run in Step 05, each detection's mean channel-5 value is recorded in the XML — so tracks can be classified by region with no post-hoc spatial query.
+To compare microglial behaviour across the lesion, each timelapse needs a region map. This step standardises orientation, auto-thresholds the tissue body, lets you draw the injury boundary (and an optional tighter injury-core ROI), and appends the result as channel 5 — a graded map of **uninjured / injured-penumbra / injury-core** rather than a plain binary split. Because all TrackMate analysers run in Step 05, each detection's mean channel-5 value is recorded in the XML, so tracks carry their region with no post-hoc spatial query.
 
 ### Run it
-Open a `_MIP.tif` (or choose **Batch directory** to walk every `*_MIP.tif` under a folder), then work through two interactive prompts per image:
+Open a `_MIP.tif` (or choose **Batch directory** to walk every `*_MIP.tif` under a folder), then work through the interactive prompts per image:
 
-1. **Standardise orientation.** Read the anatomy channel and tell the dialog which way the head points and which side the injury is on. The script flips as needed to reach the standard (head left, injury top) and records any flips as `_FH_FV` in the window title — not the saved filename.
-2. **Draw the injury boundary.** With only the neuron-trace channel shown (ch3, green) for clarity, use the **segmented line** tool: click vertices along the boundary, double-click to finish, drawing edge to edge (overshoot slightly). The macro re-prompts until a line selection is actually active, so an empty OK won't slip through.
+1. **Standardise orientation.** Read the anatomy channel (ch1, shown magenta alongside the neuron trace in green) and tell the dialog which way the head points and which side the injury is on. The script flips as needed to reach the standard (head left, injury top) and records any flips as `_FH` / `_FV` in the window title — *not* the saved filename.
+2. **Draw the injury boundary.** The view switches to the **neuron-trace channel only** (ch3, green) for clarity. With the **segmented line** tool, click vertices along the boundary and double-click to finish, drawing edge to edge across the tissue (overshoot slightly). The macro re-prompts until a line selection is actually active, so an empty OK won't slip through.
+3. **Draw the injury core** *(optional, on by default).* The view switches again and you enclose the tight cluster of injured cells with the **polygon/freehand** tool. This region is stamped as label 3, **overriding** the injured label inside it — so the output becomes the three-level core/penumbra/uninjured gradient. With `DRAW_CORE = false` this step is skipped and the output stays 0/1/2.
 
-From there it auto-thresholds the tissue from ch1 frame 1, extends your line into a polygon to split the tissue top/bottom (injured = 1, uninjured = 2), replicates the label map across all frames, and appends it as the next channel — overwriting the source file in place.
+From there it auto-thresholds the tissue from ch1 frame 1, extends your line into a polygon to split the tissue top/bottom (**top = injured/penumbra = 2, bottom = uninjured = 1**), overlays the core (= 3) clipped to the tissue body, replicates the map across all frames, and appends it as the next channel — overwriting the source file in place.
 
-![The finished annotation: cyan tissue outline plus the injury cut line clipped to the tissue, over the anatomy (magenta) and neuron-trace (green) channels.](screenshots/sample_images/sampleinjury_regions_%28RGB%29.png)
-
-*The overlay onto the output — the cyan tissue outline and the in-tissue cut line. Use it to check the result is sensible.*
+![The finished annotation: cyan tissue outline and the in-tissue cut line, with the injury core outlined in yellow, over the anatomy (magenta) and neuron-trace (green) channels.](screenshots/sample_images/sampleinjury_regions_%28RGB%29.png)
 
 > [!TIP]
-> **Check it worked.** There's no automatic validation, so it's worth a quick look at the cyan overlay before moving on: the tissue outline should hug the fin body (not leak into background or miss a chunk), and the cut line should sit where you intended, spanning the tissue edge to edge. If the outline looks wrong, the tissue threshold is the usual culprit — adjust `BLUR_SIGMA` or `THRESHOLD_METHOD` and re-run. You can also scrub through frames to confirm the label map is present on every timepoint.
+> **Check it worked.** There's no automatic validation, so glance at the overlay before moving on: the **cyan** tissue outline should hug the cord (not leak into background or miss a chunk), the cut line should span the tissue edge to edge where you intended, and the **yellow** core outline should sit over the injured cluster. If the outline looks wrong, the tissue threshold is the usual culprit — adjust `BLUR_SIGMA` or `THRESHOLD_METHOD` and re-run.
 
 ### Parameters (top of script)
 | Variable | Default | What it does |
 |----------|---------|--------------|
 | `TISSUE_CHANNEL` | 1 | Channel auto-thresholded for the tissue body (anatomy). |
-| `TRACE_CH_A` / `TRACE_CH_B` | 1 / 3 | Channels shown while drawing — anatomy (magenta) + neuron trace (green). |
+| `TRACE_CH_A` / `TRACE_CH_B` | 1 / 3 | Channels shown during orientation — anatomy (magenta) + neuron trace (green). |
 | `BLUR_SIGMA` | 10 | Gaussian blur before thresholding; merges signal into one tissue mass. |
 | `THRESHOLD_METHOD` | Percentile | Auto-threshold method for the tissue body (deliberately loose). |
-| `LABEL_INJURED` / `LABEL_UNINJURED` | 1 / 2 | Pixel values written into the region map. |
-| `OVERLAY_COLOR` / `OVERLAY_WIDTH` | cyan / 2 | Colour and width of the QC overlay. |
+| `LABEL_UNINJURED` / `LABEL_INJURED` | 1 / 2 | Pixel values for the two tissue halves (uninjured = 1, injured/penumbra = 2). |
+| `DRAW_CORE` | true | Prompt to draw a tight injury-core ROI; `false` skips it and the output stays 0/1/2. |
+| `LABEL_CORE` | 3 | Value written for the core; **overrides** injured (2) inside the ROI. |
+| `CORE_DRAW_CHANNELS` | `"0010"` | Channels shown while drawing the core. |
+| `CORE_OVERLAY_COLOR` | yellow | QC overlay colour for the core outline. |
+| `OVERLAY_COLOR` / `OVERLAY_WIDTH` | cyan / 2 | Colour and width of the tissue + cut-line QC overlay. |
 | `TARGET_HEAD` / `TARGET_INJURY` | left / top | Orientation everything is normalised to. |
 
 > [!NOTE]
-> The region map is appended additively, so the save is non-destructive in effect — you can strip the last channel any time to recover the original data. For a standard 4-channel `_MIP.tif` input this yields the 5-channel layout: anatomy, marker, trace, mask, regions. Merge Channels caps at 7 slots, so the input may have at most 6 channels.
+> The region map is appended additively, so the save is non-destructive in effect — strip the last channel any time to recover the original. A standard 4-channel `_MIP.tif` becomes 5-channel: anatomy, marker, trace, mask, regions. Merge Channels caps at 7 slots, so the input may have at most 6 channels.
 
 ### Output
-The same `_MIP.tif`, overwritten in place with the region label map added as **channel 5**. In batch mode every `*_MIP.tif` under the chosen folder is processed in turn — note each one needs interactive input (orientation dialog plus line draw), and because ImageJ macros have no try/catch, an error on any file (e.g. no line drawn) halts the whole batch.
+The same `_MIP.tif`, overwritten in place with the region map added as **channel 5** (codes 0/1/2/3). A `*_ROIs.zip` sidecar is also written, holding the cleaned QC ROIs — `tissue_body`, `cut_line`, and `injury_core` — for later inspection. In batch mode every `*_MIP.tif` under the folder is processed in turn; each needs interactive input (orientation + line + core), and because ImageJ macros have no try/catch, an error on any file (e.g. no line drawn) halts the whole batch.
+
+<!-- ===== STEP 07 — replace the two "Worth knowing" bullets ===== -->
+
+### Worth knowing
+- **Region classification lives in the spots file**, in `MEDIAN_INTENSITY_CH5`, on the gradient set by Step 04: `0.0` = outside tissue, `1.0` = uninjured, `2.0` = injured (penumbra), `3.0` = injury core. Median (not mean) is used so a spot straddling a boundary snaps to whichever region holds most of its pixels — and because the labels are an *adjacent* gradient, a straddler resolves to a neighbouring region rather than jumping across.
+- **The tracks CSV has no region column** — derive it from the spots, e.g. `spots.groupby('TRACK_ID')['MEDIAN_INTENSITY_CH5'].median().round()` (1 = uninjured, 2 = penumbra, 3 = core).
 
 ---
 
