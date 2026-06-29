@@ -197,8 +197,6 @@ Open a `_MIP.tif` (or choose **Batch directory** to walk every `*_MIP.tif` under
 
 From there it auto-thresholds the tissue from ch1 frame 1, extends your line into a polygon to split the tissue top/bottom (**top = injured/penumbra = 2, bottom = uninjured = 1**), overlays the core (= 3) clipped to the tissue body, replicates the map across all frames, and appends it as the next channel — overwriting the source file in place.
 
-![The finished annotation: cyan tissue outline and the in-tissue cut line, with the injury core outlined in yellow, over the anatomy (magenta) and neuron-trace (green) channels.](screenshots/sample_images/sampleinjury_regions_%28RGB%29.png)
-
 > [!TIP]
 > **Check it worked.** There's no automatic validation, so glance at the overlay before moving on: the **cyan** tissue outline should hug the cord (not leak into background or miss a chunk), the cut line should span the tissue edge to edge where you intended, and the **yellow** core outline should sit over the injured cluster. If the outline looks wrong, the tissue threshold is the usual culprit — adjust `BLUR_SIGMA` or `THRESHOLD_METHOD` and re-run.
 
