@@ -16,6 +16,11 @@
 //           The regions channel is appended in place — the original file
 //           is overwritten with one extra channel added (non-destructive;
 //           strip the last channel any time to recover the original data).
+//           A per-file _ROIs.zip sidecar is now written alongside each
+//           source file (batch passes its directory to annotateOne).
+//           Files that already have more than SKIP_IF_CHANNELS_EXCEED
+//           channels are treated as already-annotated and SKIPPED, so a
+//           re-run won't append a second regions channel.
 //           Any orientation flips are baked into the pixel data; the flip
 //           tags (_FH / _FV) appear only in the Fiji window title for
 //           visual feedback, not in the saved filename.
@@ -49,7 +54,6 @@
 //  The TISSUE_CHANNEL and TRACE_CHANNELS settings below encode that
 //  layout; adjust them together if your channel order differs.
 // =====================================================================
-
 // ---- CONFIG ---------------------------------------------------------
 TRACE_CHANNELS  = "1010";     // active channels while drawing: ch1 + ch3
 TRACE_CH_A      = 1;          // first channel shown for tracing (anatomy, magenta)
@@ -74,34 +78,33 @@ OVERLAY_WIDTH   = 2;
 // Orientation standardisation targets (what every image is normalised to):
 TARGET_HEAD     = "left";     // head should end up pointing this way
 TARGET_INJURY   = "top";      // injury should end up on this side
+// >>> NEW: batch re-run guard. A freshly annotated file has one extra
+// channel (standard 4-ch input -> 5-ch output). Any file with MORE than
+// this many channels is assumed already annotated and is skipped in batch.
+// Set to a higher number if your genuine inputs legitimately exceed 4 ch.
+SKIP_IF_CHANNELS_EXCEED = 4;
 // ---------------------------------------------------------------------
-
 // ---- LAUNCH: choose mode -------------------------------------------
 Dialog.create("Region Annotation — Mode");
 Dialog.addMessage("Stage 4: annotate injury region.");
 Dialog.addChoice("Mode", newArray("Single open image", "Batch directory"), "Single open image");
 Dialog.show();
 runMode = Dialog.getChoice();
-
 if (runMode == "Single open image") {
     if (nImages == 0) exit("No image is open. Open a *_MIP.tif composite first.");
     sdir = getDirectory("image");      // "" if never saved to disk
     annotateOne(getTitle(), sdir);
 }
-
- else {
+else {
     // ---- BATCH: loop over every *_MIP.tif in a chosen directory --------
     inputDir = getDirectory("Select root directory to search for *_MIP.tif files");
     if (inputDir == "") exit("No directory selected.");
-
     // Recursively collect all *_MIP.tif paths under inputDir (including subdirs).
     var targets = newArray(0);
     collectMIPs(inputDir);
     Array.sort(targets);
-
     n = targets.length;
     if (n == 0) exit("No *_MIP.tif files found under:\n" + inputDir);
-
     print("\\Clear");
     getDateAndTime(yr, mo, dow, dy, hr, mn, sc, ms);
     print("=== Region Annotation Batch  " + yr + "-" +
@@ -111,33 +114,41 @@ if (runMode == "Single open image") {
     print("Files     : " + n);
     print("(Each file requires interactive input — orientation dialog + line draw.)");
     print("");
-
-    nOK = 0;
-
+    nOK   = 0;
+    nSkip = 0;                                    // >>> NEW: count skipped files
     for (i = 0; i < n; i++) {
         filePath = targets[i];                   // full absolute path from collectMIPs
         fname    = File.getName(filePath);        // just the filename for logging
         print("[" + (i+1) + "/" + n + "]  Opening: " + fname);
         print("    Path: " + filePath);
-
         open(filePath);
-        result = annotateOne(getTitle());   // interactive; exits batch on any error
-
+        // >>> NEW: skip files that already look annotated (extra channel present).
+        getDimensions(gw, gh, gCh, gz, gt);
+        if (gCh > SKIP_IF_CHANNELS_EXCEED) {
+            print("    -> SKIPPED: " + gCh + " channels (> " + SKIP_IF_CHANNELS_EXCEED +
+                  ") — looks already annotated.");
+            print("       Strip the last channel first if you want to re-run.");
+            print("");
+            close();
+            nSkip++;
+            continue;                            // move on without touching the file
+        }
+        // >>> CHANGED: pass the file's directory so (a) the argument count is
+        // satisfied (batch previously crashed: "1 argument expected") and
+        // (b) the _ROIs.zip sidecar is written next to each source file.
+        result = annotateOne(getTitle(), File.getDirectory(filePath));   // interactive; exits batch on any error
         // Overwrite original in place — regions channel is appended additively.
         selectWindow(result);
         saveAs("Tiff", filePath);
         close();
-
         nOK++;
         print("    -> Amended in place: " + fname);
         print("");
     }
-
     getDateAndTime(yr, mo, dow, dy, hr, mn, sc, ms);
     print("=== DONE  " + IJ.pad(hr, 2) + ":" + IJ.pad(mn, 2) + ":" + IJ.pad(sc, 2) +
-          "  —  " + nOK + "/" + n + " annotated ===");
+          "  —  " + nOK + "/" + n + " annotated, " + nSkip + " skipped ===");  // >>> CHANGED
 }
-
 // =====================================================================
 // Recursive *_MIP.tif collector — appends full paths to the global
 // var targets array. Called with the root inputDir; recurses into any
@@ -151,19 +162,16 @@ function collectMIPs(dir) {
             targets = Array.concat(targets, dir + list[i]);
     }
 }
-
 // =====================================================================
 function annotateOne(title, outDir) {
     selectWindow(title);
     getDimensions(w, h, c, z, t);
     getVoxelSize(vw, vh, vd, vunit);
-
     // Strip .tif extension so output naming doesn't embed it mid-filename
     // (Fiji window titles include the extension when opened from disk).
     baseName = title;
     if (endsWith(toLowerCase(baseName), ".tif"))
         baseName = substring(baseName, 0, lengthOf(baseName) - 4);
-
     // ---- prep view: anatomy (magenta) + neuron trace (green) --------
     // Guard against images that don't have the trace channels (avoids a
     // hard error if run on an unexpected channel layout).
@@ -171,7 +179,6 @@ function annotateOne(title, outDir) {
     if (c >= TRACE_CH_A) { Stack.setChannel(TRACE_CH_A); run("Magenta"); run("Enhance Contrast", "saturated=0.35"); }
     if (c >= TRACE_CH_B) { Stack.setChannel(TRACE_CH_B); run("Green");   run("Enhance Contrast", "saturated=0.35"); }
     Stack.setActiveChannels(TRACE_CHANNELS);
-
     // ---- STEP 0: standardise orientation (head left, injury top) ----
     // Ask the user the CURRENT orientation (head read from the anatomy
     // channel), then flip as needed and record what was done in a tag.
@@ -183,7 +190,6 @@ function annotateOne(title, outDir) {
     Dialog.show();
     curHead   = Dialog.getChoice();
     curInjury = Dialog.getChoice();
-
     flipTag = "";
     // Horizontal flip if head is on the wrong side.
     if (curHead != TARGET_HEAD) {
@@ -200,13 +206,10 @@ function annotateOne(title, outDir) {
         print("Flipped vertically (injury was " + curInjury + ").");
     }
     if (flipTag == "") print("No flip needed — already standard orientation.");
-
     // After standardisation the injury is guaranteed to be on TARGET_INJURY
     // (top), so the region cut always maps top = injured, bottom = uninjured.
     injurySide = TARGET_INJURY;
-
     setTool("polyline");
-
     // ---- STEP 1: draw the injury boundary (segmented line) ----------
     // Show only the neuron trace channel (ch3, green) while drawing —
     // the axon path makes the injury boundary easiest to judge.
@@ -230,7 +233,6 @@ function annotateOne(title, outDir) {
     getSelectionCoordinates(lx, ly);
     nPts = lx.length;
     selectWindow(title); run("Select None");
-
     // ---- STEP 1b: draw the injury-core ROI (optional) ---------------
     // A tight closed region enclosing the cluster of injured cells. It is
     // stored as label LABEL_CORE and later OVERRIDES injured wherever it
@@ -260,7 +262,6 @@ function annotateOne(title, outDir) {
         coreN = cx.length;
         selectWindow(title); run("Select None");
     }
-
     // ---- auto-threshold the tissue from ch1, frame 1 ----------------
     selectWindow(title);
     run("Duplicate...", "title=tissue duplicate channels=" + TISSUE_CHANNEL + " frames=1");
@@ -276,7 +277,6 @@ function annotateOne(title, outDir) {
     close("tissue");
     selectWindow("tissue-largest");
     rename("tissue");
-    
 
     // largest-object cleanup: remove small thresholded specks outside the body
     run("Options...", "iterations=1 count=1 black");
@@ -286,7 +286,6 @@ function annotateOne(title, outDir) {
     roiManager("reset");
     roiManager("add");            // index 0 = tissue body
     close();                      // close the 'tissue' working image
-
     // ---- build the 'upper' polygon from the extended polyline ----------
     // Extend a ray backwards from the first vertex (along the first segment)
     // and forwards from the last vertex (along the last segment), then close
@@ -297,11 +296,9 @@ function annotateOne(title, outDir) {
     dx0 = lx[1] - lx[0];         dy0 = ly[1] - ly[0];
     len0 = sqrt(dx0*dx0 + dy0*dy0);
     ex_s = lx[0] - (dx0/len0)*big;  ey_s = ly[0] - (dy0/len0)*big;
-
     dxE = lx[nPts-1] - lx[nPts-2];  dyE = ly[nPts-1] - ly[nPts-2];
     lenE = sqrt(dxE*dxE + dyE*dyE);
     ex_e = lx[nPts-1] + (dxE/lenE)*big;  ey_e = ly[nPts-1] + (dyE/lenE)*big;
-
     // Polygon: extended-start → all vertices → extended-end → two top-of-image corners
     nPoly = nPts + 4;
     hx = newArray(nPoly);  hy = newArray(nPoly);
@@ -312,19 +309,15 @@ function annotateOne(title, outDir) {
     hx[nPts+3] = ex_s;        hy[nPts+3] = ey_s - big;
     makeSelection("polygon", hx, hy);
     roiManager("add");            // index 1 = upper half-plane
-
     // ---- top half = tissue AND half-plane ; bottom = tissue XOR top --
     roiManager("select", newArray(0, 1)); roiManager("AND"); roiManager("add");  // index 2 = TOP
     roiManager("select", newArray(0, 2)); roiManager("XOR"); roiManager("add");  // index 3 = BOTTOM
-
     if (injurySide == "top") { topValue = LABEL_INJURED;   bottomValue = LABEL_UNINJURED; }
     else                     { topValue = LABEL_UNINJURED; bottomValue = LABEL_INJURED; }
-
     // ---- build single-plane label, replicate across T ---------------
     newImage("regions_plane", "8-bit black", w, h, 1);
     roiManager("select", 2); setColor(topValue);    fill();
     roiManager("select", 3); setColor(bottomValue); fill();
-
     // core LAST so it overrides injured/uninjured inside its ROI,
     // clipped to the tissue body (index 0) so it can't spill into background.
     coreClipIdx = -1;
@@ -339,7 +332,6 @@ function annotateOne(title, outDir) {
         setColor(LABEL_CORE); fill();
     }
     run("Select None");
-
     newImage("regions", "8-bit black", w, h, 1, 1, t);
     for (fr = 1; fr <= t; fr++) {
         selectWindow("regions_plane"); run("Select All"); run("Copy");
@@ -347,7 +339,6 @@ function annotateOne(title, outDir) {
     }
     run("Select None");
     selectWindow("regions_plane"); close();
-
     // ---- fold the region map in as the next channel -----------------
     // GENERALISED: read the original channel count and append 'regions'
     // as channel N+1, so this works regardless of how many channels the
@@ -359,7 +350,6 @@ function annotateOne(title, outDir) {
     run("Select None");
     getDimensions(ow, oh, nCh, oz, ot);
     run("Duplicate...", "title=orig_copy duplicate");
-
     mergeArgs = "";
     if (nCh > 1) {
         // Split Channels produces "C1-orig_copy", "C2-orig_copy", ...
@@ -371,27 +361,22 @@ function annotateOne(title, outDir) {
         mergeArgs += "c1=[orig_copy] ";
     }
     mergeArgs += "c" + (nCh + 1) + "=[regions] create";
-
     run("Merge Channels...", mergeArgs);
     // Window title: base name + flip tags + _regions suffix for visual feedback.
     // The SAVED FILE is always the original path — see the batch loop above.
     finalTitle = baseName + flipTag + OUTPUT_SUFFIX;
     rename(finalTitle);
     setVoxelSize(vw, vh, vd, vunit);
-
     // Close the original — Merge Channels consumed orig_copy but left the
     // source image open. Close it now so batch mode doesn't accumulate windows.
     if (isOpen(title)) { selectWindow(title); close(); }
     selectWindow(finalTitle);
-
 // ---- overlay: tissue outline + cut line clipped to the tissue --------
 selectWindow(finalTitle);
 Overlay.remove;
-
 // 1. tissue body outline (ROI index 0)
 roiManager("select", 0);
 Overlay.addSelection(OVERLAY_COLOR, OVERLAY_WIDTH);
-
 // 2. cut line, clipped to inside the tissue, via a scratch image
 newImage("lineclip", "8-bit black", w, h, 1);
 makeSelection("polyline", lx, ly);
@@ -399,13 +384,11 @@ run("Line Width...", "line=3");          // a few px so it survives as an area
 run("Draw");                             // burn the boundary line in white
 run("Select None");
 run("Line Width...", "line=1");          // restore default line width
-
 // erase the part of the line OUTSIDE the tissue
 roiManager("select", 0);                 // tissue ROI (now applied to lineclip)
 run("Make Inverse");
 setColor(0); fill();                     // wipe everything outside the tissue
 run("Select None");
-
 // recover the surviving in-tissue line segment as a selection
 setThreshold(1, 255);
 run("Create Selection");
@@ -416,25 +399,21 @@ if (selectionType() != -1) {
     nClip = roiManager("count") - 1;
 }
 selectWindow("lineclip"); close();
-
 // add the clipped line to the overlay on the final stack
 if (nClip != -1) {
     selectWindow(finalTitle);
     roiManager("select", nClip);
     Overlay.addSelection(OVERLAY_COLOR, OVERLAY_WIDTH);
 }
-
 // add the injury-core outline (tissue-clipped) to the overlay
 if (DRAW_CORE && coreClipIdx != -1) {
     selectWindow(finalTitle);
     roiManager("select", coreClipIdx);
     Overlay.addSelection(CORE_OVERLAY_COLOR, OVERLAY_WIDTH);
 }
-
 selectWindow(finalTitle);
 run("Select None");
 Overlay.show;
-
     // ---- save QC ROIs as a .zip sidecar -----------------------------
     // Keep only the meaningful ROIs (tissue, clipped cut line, clipped core),
     // not the half-plane / boolean temporaries. We re-add them to a clean
@@ -451,7 +430,6 @@ Overlay.show;
         roiManager("select", coreClipIdx);
         roiManager("rename", "injury_core");
     }
-
     if (outDir != "") {
         // Build an index list of just the keepers, deselect-save the lot.
         // Easiest robust path: select the keepers, but roiManager("save")
@@ -461,7 +439,6 @@ Overlay.show;
         keep = Array.concat(keep, 0);
         if (nClip != -1)                          keep = Array.concat(keep, nClip);
         if (DRAW_CORE && coreClipIdx != -1)       keep = Array.concat(keep, coreClipIdx);
-
         total = roiManager("count");
         drop  = newArray(0);
         for (q = 0; q < total; q++) {
@@ -470,7 +447,6 @@ Overlay.show;
             if (!isKeeper) drop = Array.concat(drop, q);
         }
         if (drop.length > 0) { roiManager("select", drop); roiManager("delete"); }
-
         roiManager("deselect");
         roiPath = outDir + baseName + flipTag + "_ROIs.zip";
         roiManager("save", roiPath);
@@ -478,10 +454,7 @@ Overlay.show;
     }
     // -----------------------------------------------------------------
 
-    
-
 roiManager("reset");
-
     flipReport = flipTag;
     if (flipReport == "") flipReport = "none";
     print("Built '" + finalTitle + "': flips=" + flipReport +
